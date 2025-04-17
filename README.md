@@ -1,10 +1,10 @@
 # Vertalen Help Atlantis 7
 
-Een Node.js script dat Nederlandse RST-bestanden vertaalt naar Engels met behulp van de Gemini API.
+Een Node.js script dat RST-bestanden vertaalt met behulp van de Gemini API.
 
 ## Functionaliteit
 
-- Vertaalt Nederlandse RST-bestanden naar Engels
+- Vertaalt RST-bestanden van bron- naar doeltaal
 - Behoudt RST-opmaak en structuur
 - Verwerkt bestanden in batches
 - Houdt voortgang bij
@@ -34,6 +34,9 @@ Een Node.js script dat Nederlandse RST-bestanden vertaalt naar Engels met behulp
    BATCH_SIZE=50
    INTERVAL_TIME=10000
    DEBUG_MODE=true
+   BRON_TAAL=Dutch
+   DOEL_TAAL=English
+   GEMINI_MODEL=gemini-2.0-flash
    ```
 
 ## Gebruik
@@ -63,11 +66,14 @@ BATCH_SIZE=25 node src/index.js
 De volgende environment variabelen kunnen worden aangepast:
 
 - `GEMINI_API_KEY`: Je Gemini API key
-- `BRON_MAP`: Pad naar de map met Nederlandse RST-bestanden
+- `BRON_MAP`: Pad naar de map met bron RST-bestanden
 - `DOEL_MAP`: Pad naar de map waar vertaalde bestanden worden opgeslagen
 - `BATCH_SIZE`: Aantal bestanden per batch (standaard: 50)
 - `INTERVAL_TIME`: Tijd tussen batches in milliseconden (standaard: 10000)
 - `DEBUG_MODE`: Debug modus aan/uit (standaard: true)
+- `BRON_TAAL`: De brontaal (standaard: Dutch)
+- `DOEL_TAAL`: De doeltaal (standaard: English)
+- `GEMINI_MODEL`: Het Gemini model om te gebruiken (standaard: gemini-2.0-flash)
 
 ## Voortgang
 

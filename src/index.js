@@ -18,12 +18,19 @@ console.log("BATCH_SIZE environment variabele:", process.env.BATCH_SIZE);
 // Configuratie
 const config = {
     geminiApiKey: process.env.GEMINI_API_KEY,
-    bronMap: process.env.BRON_MAP,
-    doelMap: process.env.DOEL_MAP,
-    batchSize: Number(process.env.BATCH_SIZE || '5'),
-    intervalTime: Number(process.env.INTERVAL_TIME || '10000'),
-    debugMode: process.env.DEBUG_MODE === 'true'
+    bronMap: process.env.BRON_MAP || '/Users/pdiermen/Development/atlantis-docs/docs/nl',
+    doelMap: process.env.DOEL_MAP || '/Users/pdiermen/Development/atlantis-docs/docs/en',
+    batchSize: parseInt(process.env.BATCH_SIZE) || 200,
+    intervalTime: parseInt(process.env.INTERVAL_TIME) || 10000,
+    debugMode: process.env.DEBUG_MODE === 'true',
+    // Nieuwe taal configuratie
+    bronTaal: process.env.BRON_TAAL || 'Dutch',
+    doelTaal: process.env.DOEL_TAAL || 'English',
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-pro'
 };
+
+// Definieer het pad voor het voortgangsbestand
+const voortgangsBestand = path.join(config.doelMap, '.voortgang.json');
 
 console.log("Config:", {
     ...config,
@@ -37,22 +44,20 @@ console.log("Gemini API geconfigureerd");
 
 // Globale variabelen
 let nietVertaaldeWoorden = new Set();
-let verwerkteBestanden = new Set();
+let verwerkteBestanden = new Map();
 let totaalVerwerkteBestanden = 0;
-let bestandenInHuidigeBatch = 0;  // Nieuwe globale teller voor de huidige batch
+let bestandenInHuidigeBatch = 0;
 
-// Logging functie
-function log(message, type = 'info') {
+// Functie voor logging
+function log(bericht, type = "info") {
     const timestamp = new Date().toISOString();
-    const colors = {
-        info: '\x1b[36m', // Cyan
-        success: '\x1b[32m', // Groen
-        warning: '\x1b[33m', // Geel
-        error: '\x1b[31m', // Rood
-        reset: '\x1b[0m' // Reset
-    };
+    const prefix = `[${timestamp}] `;
     
-    console.log(`${colors[type]}[${timestamp}] ${message}${colors.reset}`);
+    if (type === "error") {
+        console.error(prefix + bericht);
+    } else {
+        console.log(prefix + bericht);
+    }
 }
 
 function analyseerNietVertaaldeWoorden(bronTekst, vertaaldeTekst) {
@@ -121,149 +126,211 @@ async function slaNietVertaaldeWoordenOp(doelMap) {
     }
 }
 
-async function vertaalTekst(tekst) {
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        
-        const prompt = `Vertaal de volgende Nederlandse tekst naar Engels. 
-Vertaal geen woorden die tussen accolades {} staan en vertaal geen woorden die geheel uit hoofdletters bestaan en underscore hebben. Behoud de exacte RST-indeling en opmaak van de tekst, inclusief witregels, inspringing en speciale tekens. Normale woorden die tussen * en * of ** en ** staan worden wel vertaald en de vertaling wordt weer tussen * en * of ** en ** gezet.
+async function vertaalTekst(tekst, bestandPad) {
+    // Haal witruimte aan begin en eind op
+    const leadingWhitespace = tekst.match(/^\s*/)[0];
+    const trailingWhitespace = tekst.match(/\s*$/)[0];
+    const content = tekst.trim();
 
-${tekst}`;
-        
+    // Als er geen content is, return de originele tekst
+    if (!content) {
+        return {
+            vertaaldeTekst: tekst,
+            succes: true
+        };
+    }
+
+    // Configureer het model met hogere temperature voor meer variatie
+    const model = genAI.getGenerativeModel({ 
+        model: config.geminiModel,
+        temperature: 0.3
+    });
+
+    // Maak een directe vertaalprompt
+    const prompt = `Vertaal de volgende tekst van ${config.bronTaal} naar ${config.doelTaal}.
+Regels:
+1. Behoud alle markdown/RST opmaak exact zoals in de brontekst
+2. Behoud alle variabelen tussen accolades {} exact zoals in de brontekst
+3. Behoud alle speciale tekens en opmaak
+4. Vertaal alleen de Nederlandse tekst
+5. Geef alleen de vertaalde tekst terug, zonder extra uitleg of commentaar
+
+Te vertalen tekst:
+${content}`;
+
+    // Log de bestandsinformatie
+    console.log(`\n=== VERTAALPROCES VOOR ${bestandPad} ===`);
+    console.log('Originele tekst:');
+    console.log(content);
+    console.log('\nPrompt naar Gemini:');
+    console.log(prompt);
+
+    try {
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const vertaaldeTekst = response.text();
-        
-        // Wacht een moment tussen vertalingen om rate limiting te voorkomen
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        return { vertaaldeTekst };
-    } catch (error) {
-        log('Fout bij vertalen:', "error");
-        log(error.message, "error");
-        return { vertaaldeTekst: null, fout: error.toString() };
-    }
-}
 
-async function verwerkBestand(bronBestand, doelBestand) {
-    try {
-        log(`Verwerken van bestand: ${bronBestand}`);
-        
-        // Lees het bestand
-        const tekst = await fs.promises.readFile(bronBestand, 'utf8');
-        log(`Bestand gelezen: ${bronBestand} (${tekst.length} karakters)`);
+        console.log('\nAntwoord van Gemini:');
+        console.log(vertaaldeTekst);
 
-        // Vertaal de tekst
-        log(`Start vertaling van: ${bronBestand}`);
-        const vertaalResultaat = await vertaalTekst(tekst);
-        
-        if (vertaalResultaat.vertaaldeTekst) {
-            log(`Vertaling succesvol voor: ${bronBestand}`);
-            
-            // Analyseer niet-vertaalde woorden
-            analyseerNietVertaaldeWoorden(tekst, vertaalResultaat.vertaaldeTekst);
-            
-            // Schrijf het vertaalde bestand direct op zonder verdere verwerking
-            await fs.promises.writeFile(doelBestand, vertaalResultaat.vertaaldeTekst, 'utf8');
-            log(`Vertaald bestand opgeslagen: ${doelBestand}`);
-        } else {
-            log(`Fout bij vertalen van ${bronBestand}: ${vertaalResultaat.fout}`, "error");
+        // Controleer of de vertaling geldig is
+        if (!vertaaldeTekst || vertaaldeTekst.trim() === '') {
+            console.log('\nWaarschuwing: Lege vertaling ontvangen van Gemini');
+            return {
+                vertaaldeTekst: tekst,
+                succes: false
+            };
         }
+
+        // Voeg de originele witruimte weer toe
+        const finalText = leadingWhitespace + vertaaldeTekst + trailingWhitespace;
+
+        console.log('\nFinale vertaalde tekst:');
+        console.log(finalText);
+        console.log('=== EINDE VERTAALPROCES ===\n');
+
+        return {
+            vertaaldeTekst: finalText,
+            succes: true
+        };
     } catch (error) {
-        log('Fout bij het verwerken van bestand:', "error");
-        log(error.message, "error");
-        log(error.stack, "error");
-        throw error;
+        console.error('\nFout bij vertalen:');
+        console.error(error);
+        console.log('=== EINDE VERTAALPROCES MET FOUT ===\n');
+        return {
+            vertaaldeTekst: tekst,
+            succes: false
+        };
     }
 }
 
-// Functie om verwerkte bestanden op te slaan
-async function slaVoortgangOp(doelMap) {
+// Helper functie om het verschilpercentage tussen twee arrays van woorden te berekenen
+function berekenVerschilPercentage(origineleWoorden, vertaaldeWoorden) {
+    if (!origineleWoorden.length || !vertaaldeWoorden.length) return 0;
+    
+    const uniekeOrigineleWoorden = new Set(origineleWoorden);
+    const uniekeVertaaldeWoorden = new Set(vertaaldeWoorden);
+    
+    const verschillend = [...uniekeOrigineleWoorden].filter(woord => !uniekeVertaaldeWoorden.has(woord));
+    const totaalUniekeWoorden = new Set([...origineleWoorden, ...vertaaldeWoorden]).size;
+    
+    return (verschillend.length / totaalUniekeWoorden) * 100;
+}
+
+async function verwerkBestand(bronBestand) {
     try {
-        // Gebruik altijd het hoofdbestand voor voortgang
-        const voortgangPad = path.join(config.doelMap, '.voortgang.json');
-        const data = {
-            verwerkteBestanden: Array.from(verwerkteBestanden),
-            timestamp: new Date().toISOString(),
-            totaalVerwerkteBestanden: totaalVerwerkteBestanden
-        };
-        
-        await fs.promises.writeFile(voortgangPad, JSON.stringify(data, null, 2));
-        log(`Voortgang opgeslagen in: ${voortgangPad}`);
-        log('\nOpgeslagen voortgang:');
-        log(JSON.stringify(data, null, 2));
+        // Controleer of het bestand al eerder is verwerkt
+        const doelPad = bronBestand.replace(config.bronMap, config.doelMap);
+        const bronStats = fs.statSync(bronBestand);
+        const bronWijzigingsDatum = bronStats.mtime.getTime();
+
+        // Controleer of het doelbestand bestaat
+        const doelBestandBestaat = fs.existsSync(doelPad);
+
+        // Als het bestand al eerder is verwerkt, controleer de wijzigingsdatum
+        if (verwerkteBestanden.has(bronBestand)) {
+            const laatsteVerwerkingDatum = verwerkteBestanden.get(bronBestand);
+            if (bronWijzigingsDatum <= laatsteVerwerkingDatum && doelBestandBestaat) {
+                log(`Bestand ${bronBestand} is niet gewijzigd sinds laatste verwerking, wordt overgeslagen`);
+                return true;
+            }
+        }
+
+        // Lees het bronbestand
+        const inhoud = fs.readFileSync(bronBestand, 'utf8');
+        log(`Bestand gelezen: ${bronBestand} (${inhoud.length} karakters)`);
+
+        // Start vertaling
+        log(`Start vertaling van: ${bronBestand}`);
+        const vertaalResultaat = await vertaalTekst(inhoud, bronBestand);
+
+        // Log de vertaling voor debugging
+        log(`Vertaalresultaat: ${JSON.stringify(vertaalResultaat, null, 2)}`);
+
+        // Controleer eerst of de vertaling succesvol was
+        if (!vertaalResultaat.succes) {
+            log(`Vertaling mislukt voor ${bronBestand}: ${vertaalResultaat.fout}`, "error");
+            return false;
+        }
+
+        // Controleer of de vertaalde tekst gelijk is aan de originele tekst
+        if (vertaalResultaat.vertaaldeTekst === inhoud) {
+            log(`Vertaling is identiek aan origineel voor ${bronBestand}, wordt overgeslagen`, "warning");
+            return false;
+        }
+
+        const doelDir = path.dirname(doelPad);
+
+        // Maak de doelmap aan als deze niet bestaat
+        if (!fs.existsSync(doelDir)) {
+            fs.mkdirSync(doelDir, { recursive: true });
+        }
+
+        // Schrijf het vertaalde bestand
+        fs.writeFileSync(doelPad, vertaalResultaat.vertaaldeTekst, 'utf8');
+        log(`Bestand vertaald en opgeslagen: ${doelPad}`);
+
+        // Analyseer niet-vertaalde woorden
+        analyseerNietVertaaldeWoorden(inhoud, vertaalResultaat.vertaaldeTekst);
+
+        // Update de verwerkte bestanden met de huidige wijzigingsdatum
+        verwerkteBestanden.set(bronBestand, bronWijzigingsDatum);
+        totaalVerwerkteBestanden++;
+        bestandenInHuidigeBatch++;
+
         return true;
     } catch (error) {
-        log(`Fout bij opslaan voortgang: ${error.message}`);
+        log(`Fout bij verwerken van ${bronBestand}: ${error.message}`, "error");
         return false;
     }
 }
 
-// Functie om voortgang te laden
-async function laadVoortgang(doelMap) {
+async function slaVoortgangOp() {
     try {
-        // Gebruik altijd het hoofdbestand voor voortgang
-        const voortgangPad = path.join(config.doelMap, '.voortgang.json');
-        log(`Probeer voortgang te laden van: ${voortgangPad}`);
+        // Converteer de Map naar een array van [key, value] paren voor JSON opslag
+        const verwerkteBestandenArray = Array.from(verwerkteBestanden.entries());
         
-        try {
-            await fs.promises.access(voortgangPad);
-            const data = JSON.parse(await fs.promises.readFile(voortgangPad, 'utf8'));
-            verwerkteBestanden = new Set(data.verwerkteBestanden || []);
-            totaalVerwerkteBestanden = data.totaalVerwerkteBestanden || 0;
-            log(`Voortgang geladen: ${verwerkteBestanden.size} bestanden al verwerkt`);
-            log('\nVerwerkte bestanden:');
-            verwerkteBestanden.forEach(bestand => log(`- ${bestand}`));
+        const data = {
+            verwerkteBestanden: verwerkteBestandenArray,
+            totaalVerwerkteBestanden,
+            timestamp: new Date().toISOString()
+        };
+
+        fs.writeFileSync(voortgangsBestand, JSON.stringify(data, null, 2));
+        log(`Voortgang opgeslagen in: ${voortgangsBestand}`);
+        log(`Opgeslagen voortgang:\n${JSON.stringify(data, null, 2)}`);
+    } catch (error) {
+        log(`Fout bij opslaan voortgang: ${error.message}`, "error");
+    }
+}
+
+async function laadVoortgang() {
+    try {
+        if (fs.existsSync(voortgangsBestand)) {
+            const data = JSON.parse(fs.readFileSync(voortgangsBestand, 'utf8'));
+            // Converteer de array van [key, value] paren terug naar een Map
+            verwerkteBestanden = new Map(data.verwerkteBestanden);
+            totaalVerwerkteBestanden = data.totaalVerwerkteBestanden;
+            log(`Voortgang geladen: ${verwerkteBestanden.size} bestanden eerder verwerkt`);
             return true;
-        } catch (error) {
-            if (error.code === 'ENOENT') {
-                log('Geen voortgang gevonden, start vanaf begin');
-                verwerkteBestanden = new Set();
-                totaalVerwerkteBestanden = 0;
-                return false;
-            }
-            throw error;
         }
     } catch (error) {
-        log(`Fout bij laden voortgang: ${error.message}`);
-        verwerkteBestanden = new Set();
-        totaalVerwerkteBestanden = 0;
-        return false;
+        log(`Fout bij laden voortgang: ${error.message}`, "error");
     }
+    return false;
 }
 
-// Functie om voortgang te resetten
 async function resetVoortgang(doelMap) {
     try {
-        const voortgangsBestand = path.join(doelMap, '.voortgang.json');
-        const nietVertaaldeBestand = path.join(doelMap, 'niet_vertaalde_woorden.txt');
-        
-        // Verwijder voortgangsbestand als het bestaat
-        try {
-            await fs.promises.unlink(voortgangsBestand);
-            log('Voortgangsbestand verwijderd');
-        } catch (error) {
-            // Bestand bestaat niet, dat is oké
+        if (fs.existsSync(voortgangsBestand)) {
+            fs.unlinkSync(voortgangsBestand);
+            log(`Voortgangsbestand verwijderd: ${voortgangsBestand}`);
         }
-        
-        // Verwijder niet-vertaalde woorden bestand als het bestaat
-        try {
-            await fs.promises.unlink(nietVertaaldeBestand);
-            log('Niet-vertaalde woorden bestand verwijderd');
-        } catch (error) {
-            // Bestand bestaat niet, dat is oké
-        }
-        
-        // Reset de Sets
         verwerkteBestanden.clear();
-        nietVertaaldeWoorden.clear();
-        
-        log('Voortgang succesvol gereset');
-        return true;
+        totaalVerwerkteBestanden = 0;
+        log('Voortgang gereset');
     } catch (error) {
-        log('Fout bij resetten van voortgang:', "error");
-        log(error.message, "error");
-        return false;
+        log(`Fout bij resetten voortgang: ${error.message}`, "error");
     }
 }
 
@@ -276,101 +343,96 @@ function isBatchLimietBereikt() {
     return false;
 }
 
-async function verwerkBestandenInMap(bronMap, doelMap) {
+async function verwerkBestandenInMap(bronMap, doelMap, voortgang) {
     try {
-        log(`Verwerken van map: ${bronMap}`);
+        log(`\n=== VERWERKEN VAN MAP: ${bronMap} ===`);
         
-        // Lees alle bestanden in de map
-        const bestanden = await fs.promises.readdir(bronMap);
-        const subMappen = bestanden.filter(bestand => {
-            const volledigPad = path.join(bronMap, bestand);
-            return fs.statSync(volledigPad).isDirectory();
-        });
-        
-        log(`Gevonden subfolders: ${subMappen.length}`);
-        
-        // Filter bestanden (geen submappen)
-        const bestandenInMap = bestanden.filter(bestand => {
-            const volledigPad = path.join(bronMap, bestand);
-            return !fs.statSync(volledigPad).isDirectory();
-        });
-        
-        log(`Gevonden bestanden in map: ${bestandenInMap.length}`);
-        
-        // Filter onverwerkte bestanden
-        const onverwerkteBestanden = bestandenInMap.filter(bestand => {
-            const volledigPad = path.join(bronMap, bestand);
-            return !verwerkteBestanden.has(volledigPad);
-        });
-        
-        log(`Onverwerkte bestanden in map: ${onverwerkteBestanden.length}`);
-        
-        // Verwerk bestanden tot aan de batch limit
-        for (const bestand of onverwerkteBestanden) {
-            if (isBatchLimietBereikt()) {
-                return; // Stop direct met verwerken als batch limiet is bereikt
-            }
+        // Controleer of de doelmap bestaat
+        const doelMapBestaat = await fs.promises.access(doelMap)
+            .then(() => true)
+            .catch(() => false);
             
-            const bronBestand = path.join(bronMap, bestand);
-            const doelBestand = path.join(doelMap, bestand);
-            
-            // Controleer of het bestand al verwerkt is
-            if (verwerkteBestanden.has(bronBestand)) {
-                log(`Bestand al verwerkt, overslaan: ${bestand}`);
-                continue;
-            }
-            
-            // Maak doelmap aan als deze niet bestaat
+        if (!doelMapBestaat) {
+            log(`Doelmap bestaat niet: ${doelMap}`);
             await fs.promises.mkdir(doelMap, { recursive: true });
+            log(`Doelmap aangemaakt: ${doelMap}`);
+        } else {
+            log(`Doelmap bestaat al: ${doelMap}`);
+        }
+
+        // Lees alle items in de bronmap
+        const items = await fs.promises.readdir(bronMap, { withFileTypes: true });
+        const bestanden = items.filter(item => item.isFile());
+        const mappen = items.filter(item => item.isDirectory());
+        
+        log(`Gevonden bestanden in map: ${items.length}`);
+        
+        // Verwerk eerst de .rst bestanden
+        const rstBestanden = bestanden.filter(bestand => bestand.name.endsWith('.rst'));
+        log(`Gevonden .rst bestanden: ${rstBestanden.length}`);
+        
+        for (const bestand of rstBestanden) {
+            const bestandsPad = path.join(bronMap, bestand.name);
+            const relatiefPad = path.relative(config.bronMap, bestandsPad);
             
-            if (bestand.endsWith('.rst')) {
-                log(`Verwerken van RST bestand (${bestandenInHuidigeBatch + 1}/${config.batchSize}): ${bestand}`);
-                await verwerkBestand(bronBestand, doelBestand);
-            } else {
-                log(`Kopiëren van niet-RST bestand (${bestandenInHuidigeBatch + 1}/${config.batchSize}): ${bestand}`);
-                await fs.promises.copyFile(bronBestand, doelBestand);
+            // Controleer of het bestand al is verwerkt en of de wijzigingsdatum is gewijzigd
+            if (verwerkteBestanden.has(bestandsPad)) {
+                const bronStats = await fs.promises.stat(bestandsPad);
+                const bronWijzigingsDatum = bronStats.mtime.getTime();
+                const laatsteVerwerkingDatum = verwerkteBestanden.get(bestandsPad);
+                
+                if (bronWijzigingsDatum <= laatsteVerwerkingDatum) {
+                    log(`Bestand ${bestand.name} is niet gewijzigd sinds laatste verwerking, wordt overgeslagen`);
+                    continue;
+                }
             }
             
-            // Update voortgang
-            verwerkteBestanden.add(bronBestand);
-            totaalVerwerkteBestanden++;
-            bestandenInHuidigeBatch++;
-            
-            // Sla voortgang op na elk bestand
-            await slaVoortgangOp(doelMap);
-            
-            // Check batch limiet na elk bestand
-            if (isBatchLimietBereikt()) {
-                return;
+            // Controleer batch limiet
+            if (bestandenInHuidigeBatch >= config.batchSize) {
+                log(`Batch limiet bereikt (${bestandenInHuidigeBatch}/${config.batchSize} bestanden)`);
+                log(`Voortgang wordt opgeslagen en programma wordt beëindigd`);
+                await slaVoortgangOp();
+                process.exit(0);
             }
+            
+            log(`Verwerken van bestand: ${bestandsPad}`);
+            await verwerkBestand(bestandsPad);
         }
         
-        // Verwerk submappen als we nog niet de batch limiet hebben bereikt
-        for (const subMap of subMappen) {
-            if (isBatchLimietBereikt()) {
-                return; // Stop direct met verwerken als batch limiet is bereikt
+        // Verwerk daarna de submappen
+        for (const map of mappen) {
+            const subBronMap = path.join(bronMap, map.name);
+            const subDoelMap = path.join(doelMap, map.name);
+            
+            // Controleer batch limiet
+            if (bestandenInHuidigeBatch >= config.batchSize) {
+                log(`Batch limiet bereikt (${bestandenInHuidigeBatch}/${config.batchSize} bestanden)`);
+                log(`Voortgang wordt opgeslagen en programma wordt beëindigd`);
+                await slaVoortgangOp();
+                process.exit(0);
             }
             
-            const bronSubMap = path.join(bronMap, subMap);
-            const doelSubMap = path.join(doelMap, subMap);
-            
-            await verwerkBestandenInMap(bronSubMap, doelSubMap);
-            
-            // Check batch limiet na elke submap
-            if (isBatchLimietBereikt()) {
-                return;
-            }
+            await verwerkBestandenInMap(subBronMap, subDoelMap, voortgang);
         }
         
+        log(`Klaar met verwerken van map: ${bronMap}`);
     } catch (error) {
-        log(`Fout bij verwerken van map ${bronMap}:`, "error");
-        log(error.message, "error");
+        log(`Fout bij verwerken van map ${bronMap}: ${error.message}`);
         throw error;
     }
 }
 
 async function verwerkMappen(bronMap, doelMap) {
     try {
+        // Controleer of de doelmap bestaat
+        try {
+            await fs.promises.access(doelMap);
+            log(`Doelmap bestaat al: ${doelMap}`);
+        } catch {
+            await fs.promises.mkdir(doelMap, { recursive: true });
+            log(`Doelmap aangemaakt: ${doelMap}`);
+        }
+        
         // Haal alle items op uit de bronmap
         const items = await fs.promises.readdir(bronMap, { withFileTypes: true });
         
@@ -382,7 +444,7 @@ async function verwerkMappen(bronMap, doelMap) {
         log(`Aantal submappen gevonden: ${submappen.length}`);
         
         // Verwerk eerst de bestanden in de huidige map
-        await verwerkBestandenInMap(bronMap, doelMap);
+        await verwerkBestandenInMap(bronMap, doelMap, { verwerkteBestanden: [], batchTeller: 0 });
         
         // Als we de batch_size hebben bereikt, stop dan
         if (bestandenInHuidigeBatch >= config.batchSize) {
@@ -399,7 +461,7 @@ async function verwerkMappen(bronMap, doelMap) {
             const bronSubmap = path.join(bronMap, submap.name);
             const doelSubmap = path.join(doelMap, submap.name);
             
-            // Maak de doelmap aan als deze nog niet bestaat
+            // Controleer of de doelmap bestaat
             try {
                 await fs.promises.access(doelSubmap);
                 log(`Doelmap bestaat al: ${doelSubmap}`);
@@ -417,16 +479,15 @@ async function verwerkMappen(bronMap, doelMap) {
 }
 
 async function controleerEnVerwerkMissendeBestanden(bronMap, doelMap) {
-    log("=== START CONTROLE MISSENDE BESTANDEN ===");
-    
     try {
-        // Lees alle bestanden uit de bronmap
-        const bronBestanden = await getAllFiles(bronMap);
-        log(`Totaal aantal bestanden in bronmap: ${bronBestanden.length}`);
+        log("=== CONTROLEREN VAN MISSENDE BESTANDEN ===");
         
-        // Lees alle bestanden uit de doelmap
+        // Lees alle bestanden uit beide mappen
+        const bronBestanden = await getAllFiles(bronMap);
         const doelBestanden = await getAllFiles(doelMap);
-        log(`Totaal aantal bestanden in doelmap: ${doelBestanden.length}`);
+        
+        log(`Gevonden bestanden in bronmap: ${bronBestanden.length}`);
+        log(`Gevonden bestanden in doelmap: ${doelBestanden.length}`);
         
         // Vind missende bestanden
         const missendeBestanden = bronBestanden.filter(bronBestand => {
@@ -444,47 +505,45 @@ async function controleerEnVerwerkMissendeBestanden(bronMap, doelMap) {
                 const relatievePad = path.relative(bronMap, bronBestand);
                 const doelBestand = path.join(doelMap, relatievePad);
                 
+                // Zorg dat de doelmap bestaat
+                await fs.promises.mkdir(path.dirname(doelBestand), { recursive: true });
+                
                 log(`Verwerken van missend bestand: ${bronBestand}`);
-                await verwerkBestand(bronBestand, doelBestand);
-                
-                // Voeg toe aan verwerkte bestanden
-                verwerkteBestanden.add(bronBestand);
-                totaalVerwerkteBestanden++;
-                
-                // Sla voortgang op
-                await slaVoortgangOp(doelMap);
+                await verwerkBestand(bronBestand);
             }
             
             log("Alle missende bestanden zijn verwerkt", "success");
         } else {
             log("Geen missende bestanden gevonden", "success");
         }
-        
-        return true;
     } catch (error) {
-        log(`Fout bij controleren missende bestanden: ${error.message}`, "error");
-        return false;
+        log("Fout bij controleren van missende bestanden:", "error");
+        log(error.message, "error");
+        throw error;
     }
 }
 
 // Functie om alle bestanden in een map te vinden
 async function getAllFiles(dir) {
-    const files = await fs.promises.readdir(dir);
-    const allFiles = [];
+    const files = [];
     
-    for (const file of files) {
-        const filePath = path.join(dir, file);
-        const stat = await fs.promises.stat(filePath);
+    function scanDir(currentDir) {
+        const items = fs.readdirSync(currentDir);
         
-        if (stat.isDirectory()) {
-            const subFiles = await getAllFiles(filePath);
-            allFiles.push(...subFiles);
-        } else {
-            allFiles.push(filePath);
+        for (const item of items) {
+            const fullPath = path.join(currentDir, item);
+            const stat = fs.statSync(fullPath);
+            
+            if (stat.isDirectory()) {
+                scanDir(fullPath);
+            } else if (item.endsWith('.rst')) {
+                files.push(fullPath);
+            }
         }
     }
     
-    return allFiles;
+    scanDir(dir);
+    return files;
 }
 
 // Functie om map toegang te testen
@@ -499,6 +558,96 @@ async function testMapToegang(mapPad) {
     }
 }
 
+// Functie om bestanden te analyseren en een lijst te maken van te verwerken bestanden
+async function analyseerBestanden(bronMap, doelMap) {
+    const teVerwerkenBestanden = [];
+    
+    async function scanMap(currentBronMap, currentDoelMap) {
+        const items = await fs.promises.readdir(currentBronMap, { withFileTypes: true });
+        
+        for (const item of items) {
+            const bronPad = path.join(currentBronMap, item.name);
+            const doelPad = path.join(currentDoelMap, item.name);
+            
+            if (item.isDirectory()) {
+                // Maak doelmap aan als deze niet bestaat
+                if (!fs.existsSync(doelPad)) {
+                    await fs.promises.mkdir(doelPad, { recursive: true });
+                }
+                await scanMap(bronPad, doelPad);
+            } else if (item.name.endsWith('.rst')) {
+                try {
+                    const bronStats = await fs.promises.stat(bronPad);
+                    const bronWijzigingsDatum = bronStats.mtime.getTime();
+                    
+                    // Controleer of het doelbestand bestaat
+                    let doelBestandBestaat = false;
+                    let doelWijzigingsDatum = 0;
+                    try {
+                        const doelStats = await fs.promises.stat(doelPad);
+                        doelBestandBestaat = true;
+                        doelWijzigingsDatum = doelStats.mtime.getTime();
+                    } catch (error) {
+                        // Doelbestand bestaat niet
+                    }
+                    
+                    // Controleer of het bestand verwerkt moet worden
+                    let moetVerwerken = false;
+                    
+                    if (!doelBestandBestaat) {
+                        // Doelbestand bestaat niet, moet verwerkt worden
+                        moetVerwerken = true;
+                    } else if (verwerkteBestanden.has(bronPad)) {
+                        // Bestand is eerder verwerkt, controleer wijzigingsdatum
+                        const laatsteVerwerkingDatum = verwerkteBestanden.get(bronPad);
+                        moetVerwerken = bronWijzigingsDatum > laatsteVerwerkingDatum;
+                    } else {
+                        // Bestand is nog niet verwerkt, controleer of het doelbestand ouder is
+                        moetVerwerken = bronWijzigingsDatum > doelWijzigingsDatum;
+                    }
+                    
+                    if (moetVerwerken) {
+                        teVerwerkenBestanden.push(bronPad);
+                    }
+                } catch (error) {
+                    log(`Fout bij analyseren van ${bronPad}: ${error.message}`, "error");
+                }
+            }
+        }
+    }
+    
+    await scanMap(bronMap, doelMap);
+    return teVerwerkenBestanden;
+}
+
+// Test functie voor Gemini API
+async function testGeminiAPI() {
+    try {
+        log("=== TEST GEMINI API ===");
+        const model = genAI.getGenerativeModel({ 
+            model: config.geminiModel,
+            generationConfig: {
+                temperature: 0.1,
+                topK: 1,
+                topP: 1,
+                maxOutputTokens: 2048,
+            },
+        });
+
+        const testPrompt = `Translate this ${config.bronTaal} text to ${config.doelTaal}: 'Dit is een test.'`;
+        log("Versturen test prompt naar Gemini API...");
+        const result = await model.generateContent(testPrompt);
+        const response = await result.response;
+        const vertaaldeTekst = response.text().trim();
+        log(`Test resultaat: ${vertaaldeTekst}`);
+        return true;
+    } catch (error) {
+        log('Fout bij testen van Gemini API:', "error");
+        log(error.message, "error");
+        return false;
+    }
+}
+
 // Hoofdfunctie
 async function main() {
     try {
@@ -506,6 +655,12 @@ async function main() {
         log(`Start tijd: ${new Date().toISOString()}`);
         log(`Bronmap: ${config.bronMap}`);
         log(`Doelmap: ${config.doelMap}`);
+        
+        // Test Gemini API
+        const apiWerkt = await testGeminiAPI();
+        if (!apiWerkt) {
+            throw new Error("Gemini API test mislukt");
+        }
         
         // Test map toegang
         log("Testen van map toegang...");
@@ -516,25 +671,64 @@ async function main() {
             throw new Error("Map toegang test mislukt");
         }
         
+        // Reset voortgang als --reset flag is gebruikt
+        if (process.argv.includes('--reset')) {
+            log('Voortgang resetten...');
+            await resetVoortgang(config.doelMap);
+            log('Voortgang gereset');
+        }
+
         // Laad voortgang
-        await laadVoortgang(config.doelMap);
+        await laadVoortgang();
+        log('Voortgang geladen');
+
+        // Analyseer bestanden en maak lijst van te verwerken bestanden
+        log('\n=== ANALYSE VAN BESTANDEN ===');
+        const teVerwerkenBestanden = await analyseerBestanden(config.bronMap, config.doelMap);
+        log(`\nGevonden ${teVerwerkenBestanden.length} bestanden om te verwerken`);
+
+        if (teVerwerkenBestanden.length === 0) {
+            log('🎉 Alle bestanden zijn up-to-date!');
+            return;
+        }
+
+        // Verwerk bestanden in batches
+        log('\n=== START VERWERKEN VAN BESTANDEN ===');
+        let verwerkteBestandenInBatch = 0;
         
-        // Verwerk bestanden
-        await verwerkBestandenInMap(config.bronMap, config.doelMap);
-        
-        // Controleer en verwerk missende bestanden
-        await controleerEnVerwerkMissendeBestanden(config.bronMap, config.doelMap);
-        
-        // Sla niet-vertaalde woorden op
-        await slaNietVertaaldeWoordenOp(config.doelMap);
-        
-        log("\n=== EINDE PROGRAMMA ===");
-        log(`Eind tijd: ${new Date().toISOString()}`);
-        log(`Totaal verwerkte bestanden: ${totaalVerwerkteBestanden}`);
-        
+        for (const bestandsPad of teVerwerkenBestanden) {
+            // Controleer batch limiet
+            if (bestandenInHuidigeBatch >= config.batchSize) {
+                log(`\n📊 Batch statistieken:`);
+                log(`- Verwerkte bestanden in deze batch: ${verwerkteBestandenInBatch}`);
+                log(`- Totaal verwerkte bestanden: ${totaalVerwerkteBestanden}`);
+                log(`- Batch limiet bereikt (${bestandenInHuidigeBatch}/${config.batchSize} bestanden)`);
+                log(`Voortgang wordt opgeslagen en programma wordt beëindigd`);
+                await slaVoortgangOp();
+                process.exit(0);
+            }
+
+            log(`\n📄 Verwerken van bestand ${verwerkteBestandenInBatch + 1}/${teVerwerkenBestanden.length}: ${path.relative(config.bronMap, bestandsPad)}`);
+            const succes = await verwerkBestand(bestandsPad);
+
+            if (succes) {
+                verwerkteBestandenInBatch++;
+                log(`Voortgang: ${verwerkteBestandenInBatch}/${teVerwerkenBestanden.length} bestanden verwerkt`);
+                await slaVoortgangOp();
+            }
+
+            // Wacht tussen bestanden om rate limiting te voorkomen
+            await new Promise(resolve => setTimeout(resolve, config.intervalTime));
+        }
+
+        // Sla de finale voortgang op
+        await slaVoortgangOp();
+        log('\n=== SAMENVATTING ===');
+        log(`🎉 Alle bestanden zijn verwerkt!`);
+        log(`- Totaal verwerkte bestanden in deze sessie: ${verwerkteBestandenInBatch}`);
+        log(`- Totaal verwerkte bestanden ooit: ${totaalVerwerkteBestanden}`);
     } catch (error) {
-        log("Fout in hoofdprogramma:", "error");
-        log(error.message, "error");
+        log(`❌ Fout in hoofdprogramma: ${error.message}`, "error");
         process.exit(1);
     }
 }
