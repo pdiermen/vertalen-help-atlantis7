@@ -343,6 +343,44 @@ function isBatchLimietBereikt() {
     return false;
 }
 
+async function scanMap(currentBronMap, currentDoelMap) {
+    try {
+        // Maak de doelmap aan als deze niet bestaat
+        if (!fs.existsSync(currentDoelMap)) {
+            fs.mkdirSync(currentDoelMap, { recursive: true });
+            log(`Doelmap aangemaakt: ${currentDoelMap}`);
+        }
+
+        // Lees alle items in de bronmap
+        const items = await fs.promises.readdir(currentBronMap, { withFileTypes: true });
+        
+        // Verwerk bestanden
+        for (const item of items) {
+            const bronPad = path.join(currentBronMap, item.name);
+            const doelPad = path.join(currentDoelMap, item.name);
+            
+            if (item.isDirectory()) {
+                // Recursief verwerken van submappen
+                await scanMap(bronPad, doelPad);
+            } else if (item.name.endsWith('.rst')) {
+                // .rst bestanden vertalen
+                if (!verwerkteBestanden.has(bronPad)) {
+                    const resultaat = await verwerkBestand(bronPad);
+                    if (resultaat) {
+                        log(`Bestand succesvol verwerkt: ${bronPad}`);
+                    }
+                }
+            } else {
+                // Andere bestanden direct kopiëren
+                fs.copyFileSync(bronPad, doelPad);
+                log(`Bestand gekopieerd: ${item.name}`);
+            }
+        }
+    } catch (error) {
+        log(`Fout bij het scannen van map ${currentBronMap}: ${error.message}`, "error");
+    }
+}
+
 async function verwerkBestandenInMap(bronMap, doelMap, voortgang) {
     try {
         log(`\n=== VERWERKEN VAN MAP: ${bronMap} ===`);
@@ -371,6 +409,27 @@ async function verwerkBestandenInMap(bronMap, doelMap, voortgang) {
         const rstBestanden = bestanden.filter(bestand => bestand.name.endsWith('.rst'));
         log(`Gevonden .rst bestanden: ${rstBestanden.length}`);
         
+        // Verwerk ook de niet-.rst bestanden (direct kopiëren)
+        const andereBestanden = bestanden.filter(bestand => !bestand.name.endsWith('.rst'));
+        log(`Gevonden andere bestanden: ${andereBestanden.length}`);
+        
+        // Kopieer eerst de niet-.rst bestanden
+        for (const bestand of andereBestanden) {
+            const bronPad = path.join(bronMap, bestand.name);
+            const doelPad = path.join(doelMap, bestand.name);
+            
+            // Maak de doelmap aan als deze niet bestaat
+            const doelDir = path.dirname(doelPad);
+            if (!fs.existsSync(doelDir)) {
+                fs.mkdirSync(doelDir, { recursive: true });
+            }
+            
+            // Kopieer het bestand
+            fs.copyFileSync(bronPad, doelPad);
+            log(`Bestand gekopieerd: ${bestand.name}`);
+        }
+        
+        // Verwerk de .rst bestanden
         for (const bestand of rstBestanden) {
             const bestandsPad = path.join(bronMap, bestand.name);
             const relatiefPad = path.relative(config.bronMap, bestandsPad);
@@ -412,7 +471,7 @@ async function verwerkBestandenInMap(bronMap, doelMap, voortgang) {
                 process.exit(0);
             }
             
-            await verwerkBestandenInMap(subBronMap, subDoelMap, voortgang);
+            await scanMap(subBronMap, subDoelMap);
         }
         
         log(`Klaar met verwerken van map: ${bronMap}`);
