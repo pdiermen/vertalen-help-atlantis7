@@ -47,6 +47,8 @@ let nietVertaaldeWoorden = new Set();
 let verwerkteBestanden = new Map();
 let totaalVerwerkteBestanden = 0;
 let bestandenInHuidigeBatch = 0;
+let batchIndex = 0;
+let batchSize = 0;
 
 // Functie voor logging
 function log(bericht, type = "info") {
@@ -277,6 +279,7 @@ async function verwerkBestand(bronBestand) {
         verwerkteBestanden.set(bronBestand, bronWijzigingsDatum);
         totaalVerwerkteBestanden++;
         bestandenInHuidigeBatch++;
+        batchSize++;
 
         return true;
     } catch (error) {
@@ -371,9 +374,47 @@ async function scanMap(currentBronMap, currentDoelMap) {
                     }
                 }
             } else {
-                // Andere bestanden direct kopiëren
-                fs.copyFileSync(bronPad, doelPad);
-                log(`Bestand gekopieerd: ${item.name}`);
+                // Andere bestanden alleen kopiëren als ze nog niet bestaan of verouderd zijn
+                let moetKopieren = false;
+                
+                try {
+                    // Controleer of het doelbestand bestaat
+                    const doelBestaat = await fs.promises.access(doelPad)
+                        .then(() => true)
+                        .catch(() => false);
+                    
+                    if (!doelBestaat) {
+                        // Bestand bestaat niet in doelmap, moet gekopieerd worden
+                        moetKopieren = true;
+                    } else {
+                        // Vergelijk wijzigingsdatums
+                        const bronStats = await fs.promises.stat(bronPad);
+                        const doelStats = await fs.promises.stat(doelPad);
+                        
+                        if (bronStats.mtime.getTime() > doelStats.mtime.getTime()) {
+                            // Bronbestand is nieuwer, moet gekopieerd worden
+                            moetKopieren = true;
+                        }
+                    }
+                } catch (error) {
+                    // Er is een fout opgetreden, probeer te kopiëren
+                    moetKopieren = true;
+                    log(`Fout bij controleren van ${item.name}: ${error.message}`, "warning");
+                }
+                
+                if (moetKopieren) {
+                    // Maak de doelmap aan als deze niet bestaat
+                    const doelDir = path.dirname(doelPad);
+                    if (!fs.existsSync(doelDir)) {
+                        fs.mkdirSync(doelDir, { recursive: true });
+                    }
+                    
+                    // Kopieer het bestand
+                    fs.copyFileSync(bronPad, doelPad);
+                    log(`Bestand gekopieerd: ${item.name}`);
+                } else {
+                    log(`Bestand ${item.name} is up-to-date, wordt overgeslagen`);
+                }
             }
         }
     } catch (error) {
@@ -413,20 +454,52 @@ async function verwerkBestandenInMap(bronMap, doelMap, voortgang) {
         const andereBestanden = bestanden.filter(bestand => !bestand.name.endsWith('.rst'));
         log(`Gevonden andere bestanden: ${andereBestanden.length}`);
         
-        // Kopieer eerst de niet-.rst bestanden
+        // Kopieer eerst de niet-.rst bestanden als ze nog niet bestaan of verouderd zijn
         for (const bestand of andereBestanden) {
             const bronPad = path.join(bronMap, bestand.name);
             const doelPad = path.join(doelMap, bestand.name);
             
-            // Maak de doelmap aan als deze niet bestaat
-            const doelDir = path.dirname(doelPad);
-            if (!fs.existsSync(doelDir)) {
-                fs.mkdirSync(doelDir, { recursive: true });
+            // Controleer of het bestand al bestaat en of het verouderd is
+            let moetKopieren = false;
+            
+            try {
+                // Controleer of het doelbestand bestaat
+                const doelBestaat = await fs.promises.access(doelPad)
+                    .then(() => true)
+                    .catch(() => false);
+                
+                if (!doelBestaat) {
+                    // Bestand bestaat niet in doelmap, moet gekopieerd worden
+                    moetKopieren = true;
+                } else {
+                    // Vergelijk wijzigingsdatums
+                    const bronStats = await fs.promises.stat(bronPad);
+                    const doelStats = await fs.promises.stat(doelPad);
+                    
+                    if (bronStats.mtime.getTime() > doelStats.mtime.getTime()) {
+                        // Bronbestand is nieuwer, moet gekopieerd worden
+                        moetKopieren = true;
+                    }
+                }
+            } catch (error) {
+                // Er is een fout opgetreden, probeer te kopiëren
+                moetKopieren = true;
+                log(`Fout bij controleren van ${bestand.name}: ${error.message}`, "warning");
             }
             
-            // Kopieer het bestand
-            fs.copyFileSync(bronPad, doelPad);
-            log(`Bestand gekopieerd: ${bestand.name}`);
+            if (moetKopieren) {
+                // Maak de doelmap aan als deze niet bestaat
+                const doelDir = path.dirname(doelPad);
+                if (!fs.existsSync(doelDir)) {
+                    fs.mkdirSync(doelDir, { recursive: true });
+                }
+                
+                // Kopieer het bestand
+                fs.copyFileSync(bronPad, doelPad);
+                log(`Bestand gekopieerd: ${bestand.name}`);
+            } else {
+                log(`Bestand ${bestand.name} is up-to-date, wordt overgeslagen`);
+            }
         }
         
         // Verwerk de .rst bestanden
@@ -595,8 +668,8 @@ async function getAllFiles(dir) {
             
             if (stat.isDirectory()) {
                 scanDir(fullPath);
-            } else if (item.endsWith('.rst')) {
-                files.push(fullPath);
+            } else {
+                files.push(fullPath);  // Voeg alle bestanden toe, niet alleen .rst bestanden
             }
         }
     }
@@ -634,7 +707,7 @@ async function analyseerBestanden(bronMap, doelMap) {
                     await fs.promises.mkdir(doelPad, { recursive: true });
                 }
                 await scanMap(bronPad, doelPad);
-            } else if (item.name.endsWith('.rst')) {
+            } else {
                 try {
                     const bronStats = await fs.promises.stat(bronPad);
                     const bronWijzigingsDatum = bronStats.mtime.getTime();
@@ -786,6 +859,11 @@ async function main() {
         log(`🎉 Alle bestanden zijn verwerkt!`);
         log(`- Totaal verwerkte bestanden in deze sessie: ${verwerkteBestandenInBatch}`);
         log(`- Totaal verwerkte bestanden ooit: ${totaalVerwerkteBestanden}`);
+
+        // Verhoog de batch index en reset de batch grootte
+        batchIndex++;
+        batchSize = 0;
+        log(`Volgende batch gestart (${batchIndex})`);
     } catch (error) {
         log(`❌ Fout in hoofdprogramma: ${error.message}`, "error");
         process.exit(1);
